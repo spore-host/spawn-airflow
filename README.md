@@ -19,8 +19,9 @@ worker slot per in-flight instance.
 pip install spawn-airflow
 ```
 
-Requires the `spawn` and `truffle` CLIs on `PATH` (on the Airflow worker/triggerer)
-and AWS credentials.
+Requires the `spawn` CLI on `PATH` (on the Airflow worker/triggerer) and AWS
+credentials. spawn sizes the instance via truffle itself — no separate `truffle`
+CLI needed.
 
 ## Use
 
@@ -39,10 +40,14 @@ run = SpawnRunTaskOperator(
 )
 ```
 
-The task launches an instance that runs `command`, captures stdout/stderr +
-exit code to `workdir_s3`, and self-terminates. A nonzero exit fails the task.
-File-level I/O is the command's job (it can `aws s3 cp`), exactly as
-`EcsRunTaskOperator` leaves container I/O to the container.
+The operator builds a spawn **TaskSpec** and dispatches `spawn task run`
+(detached); spawn sizes and launches an instance that runs `command`, captures
+stdout/stderr to `workdir_s3`, writes a durable completion record, and
+self-terminates. The operator polls `spawn task status` (or defers to a trigger)
+and fails the task on a nonzero exit. File-level I/O is the command's job (it can
+`aws s3 cp`), exactly as `EcsRunTaskOperator` leaves container I/O to the
+container. `instance_type` steers the instance _family_ (spawn picks the cheapest
+fit within it), rather than pinning an exact type.
 
 ### Why not ECS / Batch?
 

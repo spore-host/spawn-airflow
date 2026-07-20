@@ -4,8 +4,8 @@ truffle-auto-sized, spot-capable, self-terminating.
 """
 
 from .operator import SpawnRunTaskOperator
-from .trigger import SpawnExitCodeTrigger
+from .trigger import SpawnTaskStatusTrigger
 
 __version__ = "0.1.0"
 
-__all__ = ["SpawnRunTaskOperator", "SpawnExitCodeTrigger"]
+__all__ = ["SpawnRunTaskOperator", "SpawnTaskStatusTrigger"]
