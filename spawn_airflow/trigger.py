@@ -1,9 +1,11 @@
-"""SpawnExitCodeTrigger: async-poll the durable ``.exitcode`` object in S3.
+"""SpawnTaskStatusTrigger: async-poll the durable completion record via
+``spawn task status``.
 
 Runs in Airflow's triggerer (asyncio) so a deferred task frees its worker slot
-while the ephemeral instance runs. Reuses the pure ``completion.py`` probe via
-``asyncio.to_thread`` — no aioboto3 dependency; the sync ``aws s3 cp`` subprocess
-runs in a thread. Yields a single ``TriggerEvent`` once ``.exitcode`` appears.
+while the ephemeral instance runs. Polls ``spawn task status <id> --check-complete``
+via ``asyncio.to_thread`` (the sync subprocess runs in a thread — no async AWS
+dep), then reads the exit code from the CompletionRecord. Yields a single
+``TriggerEvent`` once the task completes.
 """
 
 from __future__ import annotations
@@ -14,38 +16,48 @@ from typing import Any, AsyncIterator
 
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 
-from . import completion
+from . import taskspec
 
 
-class SpawnExitCodeTrigger(BaseTrigger):
-    """Fire once the ``.exitcode`` object exists under the task's S3 prefix."""
+class SpawnTaskStatusTrigger(BaseTrigger):
+    """Fire once the task's completion record exists (via ``spawn task status``)."""
 
-    def __init__(self, s3_prefix: str, region: str, poll_interval: float = 15.0) -> None:
+    def __init__(self, task_id: str, region: str, poll_interval: float = 15.0) -> None:
         super().__init__()
-        self.s3_prefix = s3_prefix
+        self.task_id = task_id
         self.region = region
         self.poll_interval = poll_interval
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         return (
-            "spawn_airflow.trigger.SpawnExitCodeTrigger",
+            "spawn_airflow.trigger.SpawnTaskStatusTrigger",
             {
-                "s3_prefix": self.s3_prefix,
+                "task_id": self.task_id,
                 "region": self.region,
                 "poll_interval": self.poll_interval,
             },
         )
 
-    def _probe(self) -> "subprocess.CompletedProcess[str]":
-        argv = completion.build_exitcode_probe_argv(self.s3_prefix, self.region)
-        return subprocess.run(argv, capture_output=True, text=True)
+    def _probe_check_complete(self) -> int:
+        argv = [
+            "spawn", "task", "status", self.task_id, "--region", self.region, "--check-complete",
+        ]
+        return subprocess.run(argv, capture_output=True, text=True).returncode
+
+    def _fetch_exit_code(self) -> int:
+        argv = ["spawn", "task", "status", self.task_id, "--region", self.region, "-o", "json"]
+        out = subprocess.run(argv, capture_output=True, text=True)
+        try:
+            return int(taskspec.parse_completion_record(out.stdout).get("exit_code", 1))
+        except Exception:
+            return 1
 
     async def run(self) -> AsyncIterator[TriggerEvent]:
         while True:
-            out = await asyncio.to_thread(self._probe)
-            if out.returncode == 0:
-                code = completion.parse_exit_code(out.stdout)
-                if code is not None:
-                    yield TriggerEvent({"exit_code": code, "s3_prefix": self.s3_prefix})
-                    return
+            rc = await asyncio.to_thread(self._probe_check_complete)
+            status = taskspec.check_complete_to_status(rc)
+            if status is not None:
+                code = await asyncio.to_thread(self._fetch_exit_code)
+                yield TriggerEvent({"exit_code": code, "task_id": self.task_id})
+                return
             await asyncio.sleep(self.poll_interval)
